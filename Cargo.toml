@@ -1,0 +1,10 @@
+[package]
+name = "mio-echo-server"
+version = "0.1.0"
+authors = ["Byungwan Jun <unipro.kr@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+mio = "0.6.19"
+slab = "0.4.2"
+failure = { version = "0.1.5", default-features = false, features=["std"] }
