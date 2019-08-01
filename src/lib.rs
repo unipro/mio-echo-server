@@ -137,7 +137,7 @@ pub fn run(addr: &str) -> Result<(), Error> {
                         match server.accept() {
                             Ok((sock, addr)) => {
                                 if clients.len() < MAX_CLIENTS - 1 {
-                                    println!("connection established from {}", addr);
+                                    println!("connection established : {}", addr);
                                     let index = clients.insert(Client::new(sock));
                                     clients.get_mut(index).unwrap().register(&poll, index)?;
                                 } else {
@@ -148,7 +148,9 @@ pub fn run(addr: &str) -> Result<(), Error> {
                                 // Socket is not ready anymore, stop accepting
                                 break;
                             }
-                            e => panic!("err={:?}", e), // Unexpected error
+                            Err(e) => {
+                                return Err(e.into());
+                            }
                         }
                     }
                 }
@@ -159,22 +161,32 @@ pub fn run(addr: &str) -> Result<(), Error> {
                                 // Socket is closed, remove it
                                 clients.get(index).unwrap().deregister(&poll)?;
                                 let client = clients.remove(index);
-                                println!("connection closed by {}", client.peer_addr());
+                                println!("connection closed : {}", client.peer_addr());
                                 continue;
                             }
                             Ok(len) => {
-                                println!("read {} bytes from {}", len, clients.get(index).unwrap().peer_addr());
+                                println!("read {} bytes : {}", len, clients.get(index).unwrap().peer_addr());
                             }
-                            e => panic!("err={:?}", e), // Unexpected error
+                            Err(e) => {
+                                clients.get(index).unwrap().deregister(&poll)?;
+                                let client = clients.remove(index);
+                                println!("error={} : {}", e, client.peer_addr());
+                                continue;
+                            }
                         }
                     }
 
                     match clients.get_mut(index).unwrap().write() {
                         Ok(len) => {
                             clients.get_mut(index).unwrap().reregister(&poll, index)?;
-                            println!("write {} bytes to {}", len, clients.get(index).unwrap().peer_addr());
+                            println!("write {} bytes : {}", len, clients.get(index).unwrap().peer_addr());
                         }
-                        e => panic!("err={:?}", e), // Unexpected error
+                        Err(e) => {
+                            clients.get(index).unwrap().deregister(&poll)?;
+                            let client = clients.remove(index);
+                            println!("error={} : {}", e, client.peer_addr());
+                            continue;
+                        }
                     }
                 }
             }
