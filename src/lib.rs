@@ -7,6 +7,7 @@ use mio::{Events, Poll, PollOpt, Ready, Token};
 use slab::Slab;
 
 pub use failure::Error;
+use failure::format_err;
 
 const MAX_CLIENTS: usize = 1024;
 const DEFAULT_BUF_SIZE: usize = 1024;
@@ -106,6 +107,77 @@ impl Client {
     }
 }
 
+fn new_client(sock: TcpStream, clients: &mut Slab<Client>, poll: &Poll) -> Result<(), Error> {
+    let index = clients.insert(Client::new(sock));
+    clients.get_mut(index).unwrap().register(poll, index)?;
+    Ok(())
+}
+
+fn accept(server: &TcpListener, clients: &mut Slab<Client>, poll: &Poll) -> Result<(), Error> {
+    // Perform operations in a loop until `WouldBlock` is encountered.
+    loop {
+        match server.accept() {
+            Ok((sock, addr)) => {
+                if clients.len() < MAX_CLIENTS - 1 {
+                    println!("connection established : {}", addr);
+                    new_client(sock, clients, poll)?;
+                } else {
+                    return Err(format_err!("too many clients"));
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Socket is not ready anymore, stop accepting
+                return Ok(())
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Debug)]
+enum ClientState {
+    Ok,
+    Closed,
+    Unknown,
+}
+
+fn read(client: &mut Client, poll: &Poll) -> Result<ClientState, Error> {
+    match client.read() {
+        Ok(0) => {
+            // Socket is closed, remove it
+            client.deregister(poll)?;
+            println!("connection closed : {}", client.peer_addr());
+            return Ok(ClientState::Closed);
+        }
+        Ok(len) => {
+            println!("read {} bytes : {}", len, client.peer_addr());
+            return Ok(ClientState::Ok);
+        }
+        Err(e) => {
+            client.deregister(poll)?;
+            println!("error={} : {}", e, client.peer_addr());
+            return Err(e.into());
+        }
+    }
+}
+
+fn write(client: &mut Client, poll: &Poll, token: usize) -> Result<(), Error> {
+    match client.write() {
+        Ok(len) => {
+            println!("write {} bytes : {}", len, client.peer_addr());
+            client.reregister(poll, token)?;
+            return Ok(());
+        }
+        Err(e) => {
+            client.deregister(&poll)?;
+            println!("error={} : {}", e, client.peer_addr());
+            return Err(e.into());
+        }
+    }
+}
+
 pub fn run(addr: &str) -> Result<(), Error> {
     const SERVER_TOKEN: Token = Token(MAX_CLIENTS);
 
@@ -131,62 +203,19 @@ pub fn run(addr: &str) -> Result<(), Error> {
         for event in &events {
             match event.token() {
                 SERVER_TOKEN => {
-                    // Perform operations in a loop until `WouldBlock` is
-                    // encountered.
-                    loop {
-                        match server.accept() {
-                            Ok((sock, addr)) => {
-                                if clients.len() < MAX_CLIENTS - 1 {
-                                    println!("connection established : {}", addr);
-                                    let index = clients.insert(Client::new(sock));
-                                    clients.get_mut(index).unwrap().register(&poll, index)?;
-                                } else {
-                                    eprintln!("too many clients");
-                                }
-                            }
-                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                // Socket is not ready anymore, stop accepting
-                                break;
-                            }
-                            Err(e) => {
-                                return Err(e.into());
-                            }
-                        }
-                    }
+                    accept(&server, &mut clients, &poll)?;
                 }
                 Token(index) => {
-                    if event.readiness().is_readable() {
-                        match clients.get_mut(index).unwrap().read() {
-                            Ok(0) => {
-                                // Socket is closed, remove it
-                                clients.get(index).unwrap().deregister(&poll)?;
-                                let client = clients.remove(index);
-                                println!("connection closed : {}", client.peer_addr());
-                                continue;
-                            }
-                            Ok(len) => {
-                                println!("read {} bytes : {}", len, clients.get(index).unwrap().peer_addr());
-                            }
-                            Err(e) => {
-                                clients.get(index).unwrap().deregister(&poll)?;
-                                let client = clients.remove(index);
-                                println!("error={} : {}", e, client.peer_addr());
-                                continue;
-                            }
-                        }
-                    }
+                    let state = if event.readiness().is_readable() {
+                        read(clients.get_mut(index).unwrap(), &poll)?
+                    } else {
+                        ClientState::Unknown
+                    };
 
-                    match clients.get_mut(index).unwrap().write() {
-                        Ok(len) => {
-                            clients.get_mut(index).unwrap().reregister(&poll, index)?;
-                            println!("write {} bytes : {}", len, clients.get(index).unwrap().peer_addr());
-                        }
-                        Err(e) => {
-                            clients.get(index).unwrap().deregister(&poll)?;
-                            let client = clients.remove(index);
-                            println!("error={} : {}", e, client.peer_addr());
-                            continue;
-                        }
+                    if state != ClientState::Closed {
+                        write(clients.get_mut(index).unwrap(), &poll, index)?;
+                    } else {
+                        clients.remove(index);
                     }
                 }
             }
